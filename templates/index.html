@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="theme-color" content="#f6f7f4">
+  <title>Clearspace — a calmer inbox</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Clearspace home">
+        <span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 16a9 9 0 0 1 16.1-5.5M25 16a9 9 0 0 1-16.1 5.5"/><path d="m19.5 6.5 4 4-5.5.8M12.5 25.5l-4-4 5.5-.8"/></svg></span>
+        <span>clearspace</span>
+      </a>
+      <div class="sidebar-label">WORKSPACE</div>
+      <nav class="side-nav" aria-label="Main navigation">
+        <button class="nav-link active" data-view="suggested"><span class="nav-icon">✳</span> Suggested <span class="nav-count" id="nav-count">—</span></button>
+        <button class="nav-link" data-view="all"><span class="nav-icon">▤</span> All inbox</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="privacy-card">
+          <span class="privacy-icon">◈</span>
+          <strong>Your inbox stays yours.</strong>
+          <p>Nothing is deleted unless you confirm. Keep/Delete choices teach future suggestions and are saved locally.</p>
+        </div>
+        <div id="account-card" class="account-card hidden">
+          <span class="account-avatar" id="account-avatar">C</span>
+          <span class="account-info"><strong id="account-email">Connected</strong><small id="account-provider">Email account</small></span>
+          <button class="icon-button" id="disconnect-button" aria-label="Disconnect account" title="Disconnect account">↗</button>
+        </div>
+        <button class="learning-reset hidden" id="clear-learning-button" type="button">Clear learned patterns</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="breadcrumb"><span>Workspace</span><span class="crumb-slash">/</span><strong id="breadcrumb-current">Suggested</strong></div>
+        <div class="topbar-right">
+          <span class="secure-label"><span class="secure-dot"></span> Private by design</span>
+          <button class="button button-quiet" id="refresh-button" hidden><span class="refresh-icon">↻</span> Refresh</button>
+        </div>
+      </header>
+
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+      <section id="setup-error" class="setup-error hidden" role="alert"></section>
+
+      <section id="welcome-view" class="welcome-view hidden">
+        <div class="welcome-copy">
+          <div class="eyebrow"><span class="eyebrow-line"></span> A LITTLE MORE INBOX, A LOT LESS NOISE</div>
+          <h1>Your inbox deserves<br>a <span>fresh start.</span></h1>
+          <p class="welcome-description">Clearspace finds the emails you may not need, explains why, and leaves every decision up to you.</p>
+          <div class="provider-actions">
+            <a class="button button-primary provider-button" href="/auth/google"><span class="google-g">G</span> Connect Gmail <span class="button-arrow">↗</span></a>
+            <a class="button button-outline provider-button" href="/auth/microsoft"><span class="outlook-mark">▦</span> Connect Outlook <span class="button-arrow">↗</span></a>
+          </div>
+          <div class="welcome-reassurance"><span>✓</span> Nothing is deleted unless you confirm</div>
+        </div>
+        <div class="welcome-art" aria-hidden="true">
+          <div class="art-orbit orbit-one"></div><div class="art-orbit orbit-two"></div>
+          <div class="art-sun"></div><div class="art-leaf leaf-one"></div><div class="art-leaf leaf-two"></div>
+          <div class="art-card card-back"><i></i><i></i><i></i></div>
+          <div class="art-card card-front"><span class="art-check">✓</span><div class="art-lines"><i></i><i></i><i></i></div><div class="art-sparkle">✳</div></div>
+          <span class="art-caption">A little more breathing room</span>
+        </div>
+        <div class="welcome-footer"><span>MADE FOR A CALMER DIGITAL LIFE</span><span>Nothing moves without your say-so.</span></div>
+      </section>
+
+      <section id="dashboard-view" class="dashboard-view hidden">
+        <div class="page-heading">
+          <div>
+            <div class="eyebrow"><span class="eyebrow-line"></span> YOUR INBOX, AT A GLANCE</div>
+            <h1 id="page-title">A calmer inbox starts here.</h1>
+            <p id="page-subtitle">A few thoughtful suggestions. You make every call.</p>
+          </div>
+          <div class="heading-date" id="today-date"></div>
+        </div>
+
+        <div class="summary-grid">
+          <article class="summary-card summary-main">
+            <div class="summary-card-top"><span class="summary-icon spark-icon">✳</span><span class="summary-caption">READY FOR A LOOK</span></div>
+            <div class="summary-number" id="suggestion-count">—</div>
+            <div class="summary-label">emails you might not need</div>
+            <div class="summary-footnote"><span class="footnote-dot"></span> Suggestions are based on clear signals, not guesswork.</div>
+          </article>
+          <article class="summary-card">
+            <div class="summary-card-top"><span class="summary-icon inbox-icon">▤</span><span class="summary-caption">YOUR INBOX</span></div>
+            <div class="summary-number" id="inbox-count">—</div>
+            <div class="summary-label">messages scanned</div>
+            <div class="summary-footnote" id="inbox-progress">Inbox messages load in batches.</div>
+          </article>
+          <article class="summary-card summary-note">
+            <div class="note-illustration">☼</div>
+            <div class="note-heading">Slow is smooth.</div>
+            <p>Delete moves mail to Trash/Deleted Items only after you confirm. Clearspace never auto-deletes.</p>
+          </article>
+        </div>
+
+        <div class="list-heading">
+          <div><h2 id="list-title">Worth a second look</h2><p id="list-description">Keep or delete messages to improve future suggestions. Nothing is automatic.</p></div>
+          <label class="search-box"><span>⌕</span><input id="search-input" type="search" placeholder="Search your inbox" aria-label="Search your inbox"></label>
+        </div>
+
+        <div id="selection-bar" class="selection-bar hidden">
+          <label class="select-all"><input id="select-all" type="checkbox"><span>Select all visible</span></label>
+          <span id="selected-count">0 selected</span>
+          <button class="button button-primary button-small" id="delete-selected">Delete selected <span>→</span></button>
+        </div>
+        <div id="message-list" class="message-list"></div>
+        <div id="empty-state" class="empty-state hidden">
+          <div class="empty-illustration">✳</div>
+          <h3 id="empty-title">All clear, all yours.</h3>
+          <p id="empty-copy">There are no suggestions right now. Your inbox can take a breath.</p>
+          <button class="button button-outline" id="empty-switch" hidden>See all inbox messages</button>
+        </div>
+        <footer class="content-footer"><span>Suggestions are based on visible email signals. We don’t read between the lines.</span><span id="last-updated"></span></footer>
+      </section>
+
+      <section id="loading-view" class="loading-view hidden" aria-live="polite">
+        <div class="loader"></div><strong>Taking a thoughtful look...</strong><span>We’re checking inbox messages for clear signals.</span>
+      </section>
+    </main>
+  </div>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</body>
+</html>
