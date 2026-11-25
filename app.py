@@ -45,6 +45,7 @@ REQUEST_TIMEOUT = 15
 MESSAGE_PAGE_SIZE = 100
 AUTO_SORT_PAGE_SIZE = 20
 MAX_THROTTLE_RETRIES = 3
+GOOGLE_QUOTA_RETRY_DELAY = 60.0
 REVIEW_FOLDER_NAME = "Clearspace Review"
 
 PROMOTIONAL_CONTENT = re.compile(
@@ -272,15 +273,16 @@ def _session_id():
     return session["sid"]
 
 
-def _tokens():
-    sid = _session_id()
+def _tokens(session_id=None):
+    sid = session_id if session_id is not None else _session_id()
     with TOKEN_LOCK:
         return TOKEN_STORE.get(sid)
 
 
-def _save_tokens(value):
+def _save_tokens(value, session_id=None):
     with TOKEN_LOCK:
-        TOKEN_STORE[_session_id()] = value
+        sid = session_id if session_id is not None else _session_id()
+        TOKEN_STORE[sid] = value
 
 
 def _remove_tokens():
@@ -315,6 +317,27 @@ def _provider_config(provider):
     raise ProviderError("That email provider is not supported.")
 
 
+def _is_google_quota_error(response):
+    if response.status_code != 403:
+        return False
+    try:
+        body = response.json()
+    except (AttributeError, ValueError):
+        return False
+    error = body.get("error", {}) if isinstance(body, dict) else {}
+    if not isinstance(error, dict):
+        return False
+    message = str(error.get("message", "")).lower()
+    reasons = {
+        str(item.get("reason", "")).lower()
+        for item in error.get("errors", [])
+        if isinstance(item, dict)
+    }
+    if reasons.intersection({"ratelimitexceeded", "userratelimitexceeded"}):
+        return True
+    return "quota exceeded" in message and "per minute" in message
+
+
 def _json_response(response):
     try:
         body = response.json()
@@ -330,6 +353,9 @@ def _json_response(response):
         if response.status_code == 429:
             logging.warning("Email provider returned HTTP 429: %s", str(detail)[:300])
             raise ProviderError("Your mailbox is still busy after automatic retries. Wait briefly, then retry the failed action.")
+        if _is_google_quota_error(response):
+            logging.warning("Gmail per-user API quota is still exceeded after retry: %s", str(detail)[:300])
+            raise ProviderError("The email provider's per-user API quota was reached. Wait a minute before retrying; messages already loaded remain available.")
         logging.warning("Email provider returned HTTP %s: %s", response.status_code, str(detail)[:300])
         raise ProviderError("The email provider could not complete that request. Please try again.")
     return body
@@ -349,13 +375,13 @@ def _token_request(provider, payload):
     return _json_response(response)
 
 
-def _authorized_request(method, url, **kwargs):
-    auth = _tokens()
+def _authorized_request(method, url, session_id=None, **kwargs):
+    auth = _tokens(session_id)
     if not auth:
         raise ProviderError("Connect an email account to continue.")
     if auth.get("expires_at", 0) <= time.time() + 60:
         with REFRESH_LOCK:
-            auth = _tokens()
+            auth = _tokens(session_id)
             if not auth:
                 raise ProviderError("Connect an email account to continue.")
             if auth.get("expires_at", 0) <= time.time() + 60:
@@ -372,7 +398,7 @@ def _authorized_request(method, url, **kwargs):
                 except (KeyError, TypeError, ValueError) as exc:
                     raise ProviderError("Your connection could not be refreshed. Please reconnect your account.") from exc
                 auth["refresh_token"] = refreshed.get("refresh_token", refresh_token)
-                _save_tokens(auth)
+                _save_tokens(auth, session_id)
     headers = dict(kwargs.pop("headers", {}))
     headers["Authorization"] = "Bearer " + auth["access_token"]
     headers.setdefault("User-Agent", "Clearspace/1.0")
@@ -382,7 +408,11 @@ def _authorized_request(method, url, **kwargs):
         except requests.RequestException as exc:
             logging.warning("Email API request failed: %s", exc)
             raise ProviderError("Could not reach your email provider. Please try again.") from exc
-        if response.status_code != 429 or attempt == MAX_THROTTLE_RETRIES:
+        google_quota_error = auth.get("provider") == "google" and _is_google_quota_error(response)
+        if response.status_code != 429 and not google_quota_error:
+            return response
+        retry_limit = 1 if google_quota_error else MAX_THROTTLE_RETRIES
+        if attempt == retry_limit:
             return response
         retry_after = response.headers.get("Retry-After", "")
         try:
@@ -394,12 +424,14 @@ def _authorized_request(method, url, **kwargs):
                     retry_time = retry_time.replace(tzinfo=timezone.utc)
                 delay = max(0.0, (retry_time - datetime.now(timezone.utc)).total_seconds())
             except (TypeError, ValueError, OverflowError):
-                delay = float(2 ** attempt)
+                delay = GOOGLE_QUOTA_RETRY_DELAY if google_quota_error else float(2 ** attempt)
+        if google_quota_error:
+            delay = max(delay, GOOGLE_QUOTA_RETRY_DELAY)
         logging.warning(
             "Email provider throttled the request; retrying in %.1f seconds (%s/%s)",
             delay,
             attempt + 1,
-            MAX_THROTTLE_RETRIES,
+            retry_limit,
         )
         time.sleep(delay)
 
@@ -445,6 +477,7 @@ def _load_google_messages(
     label_ids=None,
     page_size=MESSAGE_PAGE_SIZE,
 ):
+    session_id = _session_id()
     url = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
     params = {"maxResults": page_size}
     if label_ids:
@@ -460,13 +493,14 @@ def _load_google_messages(
         params["q"] = query
     if page_token:
         params["pageToken"] = page_token
-    result = _json_response(_authorized_request("GET", url, params=params))
+    result = _json_response(_authorized_request("GET", url, session_id=session_id, params=params))
     items = result.get("messages", [])
 
     def load_one(item):
         raw = _json_response(_authorized_request(
             "GET",
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/" + item["id"],
+            session_id=session_id,
             params={"format": "full"} if include_body else {
                 "format": "metadata",
                 "metadataHeaders": ["From", "Subject", "Date", "List-Unsubscribe"],
@@ -496,7 +530,7 @@ def _load_google_messages(
             message["_body_text"] = _decode_google_body(raw.get("payload", {}))
         return _suggestion(message, sender_feedback)
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         messages = list(pool.map(load_one, items))
     return messages, result.get("nextPageToken")
 

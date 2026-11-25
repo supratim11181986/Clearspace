@@ -164,14 +164,44 @@ class ClearspaceTests(unittest.TestCase):
                 "internalDate": "0",
             })
 
-        with patch.object(app, "_authorized_request", side_effect=request):
-            first_page, next_page = app._load_google_messages()
-            second_page, final_page = app._load_google_messages(next_page)
+        with app.app.test_request_context("/"):
+            with patch.object(app, "_authorized_request", side_effect=request):
+                first_page, next_page = app._load_google_messages()
+                second_page, final_page = app._load_google_messages(next_page)
 
         self.assertEqual([message["id"] for message in first_page], ["first"])
         self.assertEqual(next_page, "page-2")
         self.assertEqual([message["id"] for message in second_page], ["second"])
         self.assertIsNone(final_page)
+
+    def test_google_message_workers_use_captured_session(self):
+        auth = {
+            "provider": "google",
+            "email": "owner@gmail.com",
+            "access_token": "test-access-token",
+            "expires_at": app.time.time() + 3600,
+        }
+
+        with self.client.session_transaction() as browser_session:
+            browser_session["sid"] = "parallel-google-session"
+
+        def request(_method, url, **_kwargs):
+            if url.endswith("/messages"):
+                return FakeResponse({"messages": [{"id": "message-1"}]})
+            return FakeResponse({
+                "id": "message-1",
+                "payload": {"headers": []},
+                "labelIds": [],
+                "internalDate": "0",
+            })
+
+        with patch.dict(app.TOKEN_STORE, {"parallel-google-session": auth}, clear=True), patch.object(
+            app.requests, "request", side_effect=request
+        ):
+            response = self.client.get("/api/messages")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["messages"][0]["id"], "message-1")
 
     def test_microsoft_messages_return_batched_pages(self):
         next_page = "https://graph.microsoft.com/v1.0/next-page"
@@ -212,8 +242,9 @@ class ClearspaceTests(unittest.TestCase):
 
     def test_auto_sort_provider_queries_only_messages_since_last_scan(self):
         since = "2026-11-24T12:00:00+00:00"
-        with patch.object(app, "_authorized_request", return_value=FakeResponse({"messages": []})) as request:
-            app._load_google_messages(since=since, include_body=True, page_size=app.AUTO_SORT_PAGE_SIZE)
+        with app.app.test_request_context("/"):
+            with patch.object(app, "_authorized_request", return_value=FakeResponse({"messages": []})) as request:
+                app._load_google_messages(since=since, include_body=True, page_size=app.AUTO_SORT_PAGE_SIZE)
         google_params = request.call_args.kwargs["params"]
         self.assertIn("in:inbox", google_params["q"])
         self.assertIn("after:", google_params["q"])
@@ -343,6 +374,37 @@ class ClearspaceTests(unittest.TestCase):
         self.assertIs(response, success)
         self.assertEqual(request.call_count, 2)
         sleep.assert_called_once_with(2.0)
+
+    def test_authorized_request_retries_gmail_per_user_quota_after_a_minute(self):
+        auth = {
+            "provider": "google",
+            "access_token": "test-token",
+            "expires_at": datetime.now(timezone.utc).timestamp() + 3600,
+        }
+        quota_error = FakeResponse({
+            "error": {
+                "message": "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'.",
+                "errors": [{"reason": "quotaExceeded"}],
+            },
+        }, 403)
+        success = FakeResponse({"messages": []})
+
+        with self.assertLogs("root", level="WARNING") as logs:
+            with patch.object(app, "_tokens", return_value=auth), patch.object(
+                app.requests, "request", side_effect=[quota_error, success]
+            ) as request, patch.object(app.time, "sleep") as sleep:
+                response = app._authorized_request(
+                    "GET",
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                )
+
+        self.assertIs(response, success)
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(app.GOOGLE_QUOTA_RETRY_DELAY)
+        self.assertIn("(1/1)", logs.output[0])
+
+        with self.assertRaisesRegex(app.ProviderError, "per-user API quota was reached"):
+            app._json_response(quota_error)
 
     def test_messages_api_uses_an_opaque_cursor_for_following_batches(self):
         auth = {"provider": "microsoft"}
